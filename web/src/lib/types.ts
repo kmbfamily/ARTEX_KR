@@ -921,6 +921,13 @@ export interface Settings {
   // write-only: only sent on PUT to store/clear the key.
   brave_search_api_key?: string;
   tavily_search_api_key?: string;
+  // DeepSeek 官方联网搜索的专用凭据。deepseek_key_set 只反映 key 是否已存(值从不回传)；
+  // base_url/model 不是秘密，GET 回显当前值。任一字段留空=回落到当前激活的 LLM 配置。
+  deepseek_key_set: boolean;
+  deepseek_search_base_url?: string;
+  deepseek_search_model?: string;
+  // write-only: PUT 时提交以存/清 key(发 "" 清空后回落到激活 LLM 配置)。
+  deepseek_search_api_key?: string;
   // 独立出口代理(http/https/socks5)，用于访问搜索端点；与记录流量的 MITM 代理无关。空=直连。
   web_search_proxy?: string;
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为

@@ -35,7 +35,12 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	// [C] (中间产物输出规约) is ALWAYS appended — editing the body can't drop it.
 	PromptOverride = func(k string) (string, bool) { return "PLANNER {{.Goal}}", true }
 	got := plannerSystem("拿下X", "/data", "/data")
-	if !strings.HasPrefix(got, "PLANNER 拿下X") {
+	// The Korean output anchor is now the code-owned HEAD (front bookend); the body
+	// follows it, so it's no longer the prefix — assert anchor-first + body present.
+	if !strings.HasPrefix(got, langAnchor()) {
+		t.Fatalf("plannerSystem must start with the Korean output anchor: %q", got)
+	}
+	if !strings.Contains(got, "PLANNER 拿下X") {
 		t.Fatalf("plannerSystem body not honored: %q", got)
 	}
 	if !strings.Contains(got, "中间产物输出规约") || !strings.Contains(got, "/data") {
@@ -51,7 +56,10 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 		return "{{if .ProxyAddr}}走代理 {{.ProxyAddr}}{{else}}手动{{end}}", true
 	}
 	recording := workerSystem("127.0.0.1:8080", "/ca.pem", "/data", "/data")
-	if !strings.HasPrefix(recording, "走代理 127.0.0.1:8080") {
+	if !strings.HasPrefix(recording, langAnchor()) {
+		t.Fatalf("worker must start with the Korean output anchor: %q", recording)
+	}
+	if !strings.Contains(recording, "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker proxy branch body: %q", recording)
 	}
 	if !strings.Contains(recording, "traffic_search") {
@@ -66,14 +74,14 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 	// Egress proxy set but capture OFF (no CA): the ProxyAddr template branch still
 	// renders, but the trafficTool block must NOT — those tools are not registered.
 	egressOnly := workerSystem("127.0.0.1:8080", "", "/data", "/data")
-	if !strings.HasPrefix(egressOnly, "走代理 127.0.0.1:8080") {
+	if !strings.Contains(egressOnly, "走代理 127.0.0.1:8080") {
 		t.Fatalf("worker egress-only branch body: %q", egressOnly)
 	}
 	if strings.Contains(egressOnly, "traffic_search") {
 		t.Fatalf("worker without recording must NOT inject trafficTool: %q", egressOnly)
 	}
 	noProxy := workerSystem("", "", "/data", "/data")
-	if !strings.HasPrefix(noProxy, "手动") {
+	if !strings.Contains(noProxy, "手动") {
 		t.Fatalf("worker no-proxy branch body: %q", noProxy)
 	}
 	if strings.Contains(noProxy, "traffic_search") {
@@ -110,6 +118,16 @@ func TestLangDirectiveAppendedToUserFacingRoles(t *testing.T) {
 	if !strings.Contains(dir, "态势") {
 		t.Fatalf("langDirective must name the planner situation summary as user-facing, got %q", dir)
 	}
+	// Point-1 hardening: a mandatory pre-output self-check (scan for leaked Chinese
+	// and rewrite before returning) must be present in the tail directive.
+	if !strings.Contains(dir, "输出前自检") {
+		t.Fatalf("langDirective must include the pre-output self-check, got %q", dir)
+	}
+	// Point-1 hardening: the short Korean-output anchor (front bookend) must exist and
+	// force Korean, so the mandate is restated BEFORE the long body, not only after it.
+	if a := langAnchor(); !strings.Contains(a, "한국어") {
+		t.Fatalf("langAnchor must force Korean output, got %q", a)
+	}
 
 	// Even with a DB body that is pure non-directive text, the code-owned tail is
 	// still appended for each user-facing builder — identical guarantee to the
@@ -127,14 +145,20 @@ func TestLangDirectiveAppendedToUserFacingRoles(t *testing.T) {
 		"goals": goalsSystem("/data", true),
 	}
 	for role, sys := range cases {
-		if !strings.HasPrefix(sys, "BODY-ONLY") {
+		// Front bookend: the code-owned Korean anchor now leads every assembly.
+		if !strings.HasPrefix(sys, langAnchor()) {
+			t.Fatalf("%s: must start with the Korean output anchor: %q", role, sys)
+		}
+		if !strings.Contains(sys, "BODY-ONLY") {
 			t.Fatalf("%s: DB body not honored: %q", role, sys)
 		}
 		if !strings.Contains(sys, "한국어") {
 			t.Fatalf("%s: missing Korean output-language tail: %q", role, sys)
 		}
-		// The directive is the tail — it must come AFTER the body (recency).
-		if strings.Index(sys, "한국어") <= strings.Index(sys, "BODY-ONLY") {
+		// The full directive is the tail — it must come AFTER the body (recency). Use a
+		// tail-ONLY marker (输出前自检, absent from the front anchor) so the anchor's
+		// leading 한국어/原样逐字保留 can't be mistaken for the tail when ordering.
+		if strings.Index(sys, "输出前自检") <= strings.Index(sys, "BODY-ONLY") {
 			t.Fatalf("%s: langDirective must be appended after the body: %q", role, sys)
 		}
 	}

@@ -240,6 +240,11 @@ type Manager struct {
 	braveKey         string
 	tavilyKey        string
 	webSearchProxy   string
+	// DeepSeek 官方联网搜索的专用凭据（settings.deepseek_search_*）。任一字段留空时
+	// 回落到当前激活的 LLM 配置（见 deepSeekSearchCreds），兼容「借用激活配置」的旧行为。
+	deepSeekKey     string
+	deepSeekBaseURL string
+	deepSeekModel   string
 	// globalProxy is the egress proxy all target traffic routes through
 	// (http/https/socks5, optional user:pass). Empty = direct. When traffic
 	// capture is on it becomes the MITM's upstream; when capture is off it is
@@ -256,6 +261,10 @@ const (
 	settingBraveKey            = "brave_search_api_key"
 	settingTavilyKey           = "tavily_search_api_key"
 	settingWebSearchProxy      = "web_search_proxy"
+	// DeepSeek 官方联网搜索的专用凭据键。留空则 deepSeekSearchCreds 按字段回落到激活 LLM 配置。
+	settingDeepSeekKey     = "deepseek_search_api_key"
+	settingDeepSeekBaseURL = "deepseek_search_base_url"
+	settingDeepSeekModel   = "deepseek_search_model"
 	// settingGlobalProxy is the global egress proxy for all target traffic
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
@@ -439,6 +448,16 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingWebSearchProxy); ok {
 		m.webSearchProxy = v
 	}
+	// DeepSeek 专用联网搜索凭据（留空的字段在使用时回落到激活 LLM 配置）。
+	if v, ok, _ := pg.GetSetting(settingDeepSeekKey); ok {
+		m.deepSeekKey = v
+	}
+	if v, ok, _ := pg.GetSetting(settingDeepSeekBaseURL); ok {
+		m.deepSeekBaseURL = v
+	}
+	if v, ok, _ := pg.GetSetting(settingDeepSeekModel); ok {
+		m.deepSeekModel = v
+	}
 	// Global egress proxy (default: direct). When capture is on, feed it to the
 	// MITM as its upstream so recorded traffic exits through it; when capture is
 	// off, ProxyAddr hands it to agents directly (bash env / WebFetch).
@@ -577,19 +596,74 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	return o
 }
 
-// deepSeekSearchCreds resolves the credentials the "deepseek" search backend
-// borrows from the active LLM profile (it has no key of its own). Whether that
-// profile can actually drive server-side search — DeepSeek exposes it only on
-// the Anthropic-format endpoint — is deliberately NOT validated here: the UI
-// states the requirement and the user decides. A profile that can't serve it
-// simply fails at search time (or at the settings page's 测试 button), which is
-// the same feedback every other backend gives for a bad key.
-func (m *Manager) deepSeekSearchCreds() (baseURL, apiKey, model string) {
-	p, err := m.pg.ActiveProfile()
-	if err != nil || p == nil {
-		return "", "", ""
+// DeepSeekSearch returns the dedicated DeepSeek-search credentials as stored
+// (each empty unless explicitly set). The API key is a secret; callers that
+// expose this to the UI must report only its presence, never the value.
+func (m *Manager) DeepSeekSearch() (apiKey, baseURL, model string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.deepSeekKey, m.deepSeekBaseURL, m.deepSeekModel
+}
+
+// SetDeepSeekSearch persists the dedicated DeepSeek-search credentials. Each
+// argument is left untouched when nil (so a partial save keeps the others), and
+// an explicit "" clears that field (→ it falls back to the active LLM profile).
+// Callers must rebuild agents (applyLLM) afterwards so the change takes effect.
+func (m *Manager) SetDeepSeekSearch(apiKey, baseURL, model *string) error {
+	if apiKey != nil {
+		if err := m.pg.SetSetting(settingDeepSeekKey, *apiKey); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		m.deepSeekKey = *apiKey
+		m.mu.Unlock()
 	}
-	return p.BaseURL, p.APIKey, p.Model
+	if baseURL != nil {
+		v := strings.TrimSpace(*baseURL)
+		if err := m.pg.SetSetting(settingDeepSeekBaseURL, v); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		m.deepSeekBaseURL = v
+		m.mu.Unlock()
+	}
+	if model != nil {
+		v := strings.TrimSpace(*model)
+		if err := m.pg.SetSetting(settingDeepSeekModel, v); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		m.deepSeekModel = v
+		m.mu.Unlock()
+	}
+	return nil
+}
+
+// deepSeekSearchCreds resolves the credentials the "deepseek" search backend
+// uses. It prefers the dedicated values entered on the settings page, and for
+// any field left blank it falls back to the active LLM profile (the original
+// "borrow the active profile" behavior, kept for backward compatibility).
+// Whether the resulting combination can actually drive server-side search —
+// DeepSeek exposes it only on the Anthropic-format endpoint — is deliberately
+// NOT validated here: the UI states the requirement and the user decides. A
+// combination that can't serve it simply fails at search time (or at the
+// settings page's 测试 button), the same feedback every other backend gives.
+func (m *Manager) deepSeekSearchCreds() (baseURL, apiKey, model string) {
+	apiKey, baseURL, model = m.DeepSeekSearch()
+	if strings.TrimSpace(apiKey) == "" || strings.TrimSpace(baseURL) == "" || strings.TrimSpace(model) == "" {
+		if p, err := m.pg.ActiveProfile(); err == nil && p != nil {
+			if strings.TrimSpace(baseURL) == "" {
+				baseURL = p.BaseURL
+			}
+			if strings.TrimSpace(apiKey) == "" {
+				apiKey = p.APIKey
+			}
+			if strings.TrimSpace(model) == "" {
+				model = p.Model
+			}
+		}
+	}
+	return baseURL, apiKey, model
 }
 
 // SetWebSearch persists and applies the web-search settings. braveKey, tavilyKey, and

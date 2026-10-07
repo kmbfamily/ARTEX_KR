@@ -34,6 +34,13 @@ export default function SystemSettingsPage() {
   const [tavilyKeySet, setTavilyKeySet] = React.useState(false);
   const [tavilyKeyInput, setTavilyKeyInput] = React.useState("");
   const [savingTavilyKey, setSavingTavilyKey] = React.useState(false);
+  // DeepSeek 전용 검색 자격증명. key 는 입력값만 들고 있다가 저장 후 비운다(존재 여부는 deepseekKeySet).
+  // base_url/model 은 비밀이 아니므로 현재 값을 그대로 표시한다(비우면 활성 LLM 설정으로 대체).
+  const [deepseekKeySet, setDeepseekKeySet] = React.useState(false);
+  const [deepseekKeyInput, setDeepseekKeyInput] = React.useState("");
+  const [deepseekBaseUrl, setDeepseekBaseUrl] = React.useState("");
+  const [deepseekModel, setDeepseekModel] = React.useState("");
+  const [savingDeepseek, setSavingDeepseek] = React.useState(false);
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
@@ -61,6 +68,9 @@ export default function SystemSettingsPage() {
     setBackend(s.web_search_backend || "ddgs");
     setBraveKeySet(!!s.brave_key_set);
     setTavilyKeySet(!!s.tavily_key_set);
+    setDeepseekKeySet(!!s.deepseek_key_set);
+    setDeepseekBaseUrl(s.deepseek_search_base_url ?? "");
+    setDeepseekModel(s.deepseek_search_model ?? "");
     setProxyInput(s.web_search_proxy ?? "");
     setGlobalProxyInput(s.global_proxy ?? "");
     setPyInterp(s.python_interpreter ?? "");
@@ -216,6 +226,26 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingTavilyKey(false));
   };
 
+  // DeepSeek 전용 검색 자격증명 저장. base_url/model 은 비밀이 아니므로 항상 보내고(비우면 서버가
+  // 활성 LLM 설정으로 대체), key 는 입력했을 때만 보낸다(빈 입력 = 기존 값 유지, brave/tavily 와 동일).
+  const saveDeepseek = () => {
+    setSavingDeepseek(true);
+    const patch: Partial<Settings> = {
+      deepseek_search_base_url: deepseekBaseUrl.trim(),
+      deepseek_search_model: deepseekModel.trim(),
+    };
+    if (deepseekKeyInput.trim() !== "") patch.deepseek_search_api_key = deepseekKeyInput;
+    api
+      .setSettings(patch)
+      .then((s) => {
+        apply(s);
+        setDeepseekKeyInput("");
+        toast.success(t("toast.deepseekSaved"));
+      })
+      .catch((e) => toast.error(t("toast.saveFailed", { error: (e as Error).message })))
+      .finally(() => setSavingDeepseek(false));
+  };
+
   const saveProxy = () => {
     setSavingProxy(true);
     api
@@ -250,6 +280,9 @@ export default function SystemSettingsPage() {
         web_search_proxy: proxyInput.trim(),
         brave_search_api_key: braveKeyInput,
         tavily_search_api_key: tavilyKeyInput,
+        deepseek_search_api_key: deepseekKeyInput,
+        deepseek_search_base_url: deepseekBaseUrl.trim(),
+        deepseek_search_model: deepseekModel.trim(),
       })
       .then((r) => {
         if (r.ok) toast.success(t("toast.testSuccess", { backend: r.backend ?? "", count: r.count ?? 0 }));
@@ -468,6 +501,62 @@ export default function SystemSettingsPage() {
                   {t.rich("webSearch.deepseekDesc2", richTags)}
                 </p>
                 <p className="text-muted-foreground text-xs leading-relaxed">{t("webSearch.deepseekDesc3")}</p>
+
+                <div className="mt-1 flex flex-col gap-3 border-t border-border/60 pt-3">
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="deepseek-key" className="text-sm font-normal text-muted-foreground">
+                      {t("webSearch.deepseekKeyLabel")}
+                      {deepseekKeySet && (
+                        <span className="ml-2 text-xs text-emerald-500">{t("configured")}</span>
+                      )}
+                    </Label>
+                    <Input
+                      id="deepseek-key"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={
+                        deepseekKeySet
+                          ? t("webSearch.deepseekKeyPlaceholderSet")
+                          : t("webSearch.deepseekKeyPlaceholderUnset")
+                      }
+                      value={deepseekKeyInput}
+                      disabled={!loaded || savingDeepseek}
+                      onChange={(e) => setDeepseekKeyInput(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="deepseek-base-url" className="text-sm font-normal text-muted-foreground">
+                      {t("webSearch.deepseekBaseUrlLabel")}
+                    </Label>
+                    <Input
+                      id="deepseek-base-url"
+                      autoComplete="off"
+                      placeholder={t("webSearch.deepseekBaseUrlPlaceholder")}
+                      value={deepseekBaseUrl}
+                      disabled={!loaded || savingDeepseek}
+                      onChange={(e) => setDeepseekBaseUrl(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="deepseek-model" className="text-sm font-normal text-muted-foreground">
+                      {t("webSearch.deepseekModelLabel")}
+                    </Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="deepseek-model"
+                        autoComplete="off"
+                        placeholder={t("webSearch.deepseekModelPlaceholder")}
+                        value={deepseekModel}
+                        disabled={!loaded || savingDeepseek}
+                        onChange={(e) => setDeepseekModel(e.target.value)}
+                      />
+                      <Button type="button" onClick={saveDeepseek} disabled={!loaded || savingDeepseek}>
+                        {t("save")}
+                      </Button>
+                    </div>
+                  </div>
+                  <p className="text-muted-foreground text-xs">{t("webSearch.deepseekFallbackNote")}</p>
+                </div>
               </div>
             )}
 

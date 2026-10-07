@@ -818,6 +818,9 @@ export const api = {
     web_search_proxy?: string;
     brave_search_api_key?: string;
     tavily_search_api_key?: string;
+    deepseek_search_api_key?: string;
+    deepseek_search_base_url?: string;
+    deepseek_search_model?: string;
   }) => post<{ ok: boolean; error?: string; count?: number; backend?: string }>(`/settings/web-search/test`, patch),
 
   // ---- 漏洞 IM 推送 ----

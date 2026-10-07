@@ -3346,15 +3346,19 @@ func (s *Server) getTrafficBlob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// getSettings returns the runtime app settings the UI toggles. The Brave API key
-// is returned as a boolean presence flag (brave_key_set), never the value itself,
-// so the UI can show "configured" without echoing the secret back.
+// getSettings returns the runtime app settings the UI toggles. Secret API keys
+// (Brave / Tavily / DeepSeek) are returned as boolean presence flags
+// (brave_key_set / tavily_key_set / deepseek_key_set), never the value itself,
+// so the UI can show "configured" without echoing the secret back. The DeepSeek
+// base_url/model are not secrets and are echoed so the UI can prefill them
+// (empty = fall back to the active LLM profile).
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.settingsPayload())
 }
 
 func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
+	dsKey, dsBaseURL, dsModel := s.m.DeepSeekSearch()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
 	concOn, concLimit := s.m.ConcurrencyLimit()
 	if concLimit == 0 {
@@ -3368,7 +3372,10 @@ func (s *Server) settingsPayload() map[string]any {
 		"web_search_backend":       backend,
 		"brave_key_set":            strings.TrimSpace(braveKey) != "",
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"deepseek_key_set":         strings.TrimSpace(dsKey) != "",
+		"deepseek_search_base_url": dsBaseURL,
+		"deepseek_search_model":    dsModel,
+		"web_search_proxy":         proxy, // 独立出口代理(http/https/socks5)，空=直连
 		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
 		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
@@ -3444,6 +3451,10 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		GlobalProxy      *string `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
 		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+		// DeepSeek 专用联网搜索凭据；null=不改，""=清空(清空后该字段回落到激活 LLM 配置)。
+		DeepSeekKey     *string `json:"deepseek_search_api_key"`
+		DeepSeekBaseURL *string `json:"deepseek_search_base_url"`
+		DeepSeekModel   *string `json:"deepseek_search_model"`
 		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
 		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
 		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
@@ -3611,6 +3622,13 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		changed = true
 	}
+	if req.DeepSeekKey != nil || req.DeepSeekBaseURL != nil || req.DeepSeekModel != nil {
+		if err := s.m.SetDeepSeekSearch(req.DeepSeekKey, req.DeepSeekBaseURL, req.DeepSeekModel); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		changed = true
+	}
 	if changed {
 		// rebuild agents so the new proxy/tools/prompt/web-search take hold (only if LLM configured).
 		s.cfgMu.Lock()
@@ -3637,6 +3655,10 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 		Proxy     string `json:"web_search_proxy"`
 		BraveKey  string `json:"brave_search_api_key"`
 		TavilyKey string `json:"tavily_search_api_key"`
+		// DeepSeek 专用凭据：表单里未改的秘密字段为空，下面回落到已存/激活配置。
+		DeepSeekKey     string `json:"deepseek_search_api_key"`
+		DeepSeekBaseURL string `json:"deepseek_search_base_url"`
+		DeepSeekModel   string `json:"deepseek_search_model"`
 	}
 	// Empty body is fine — fall back entirely to the saved config below.
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
@@ -3667,7 +3689,18 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	// 本来就是给用户自己确认的手段，真跑不通时下面的报错比预判更有信息量。
 	probeQuery := "test"
 	if strings.TrimSpace(backend) == deepSeekWebSearchBackend {
+		// 先取已存/回落激活配置的凭据，再用表单里本次输入的值逐字段覆盖，
+		// 这样「未保存就测试」也能反映当前表单（空字段仍回落，无需重输秘密）。
 		cfg.DeepSeekBaseURL, cfg.DeepSeekAPIKey, cfg.DeepSeekModel = s.m.deepSeekSearchCreds()
+		if v := strings.TrimSpace(req.DeepSeekBaseURL); v != "" {
+			cfg.DeepSeekBaseURL = v
+		}
+		if strings.TrimSpace(req.DeepSeekKey) != "" {
+			cfg.DeepSeekAPIKey = req.DeepSeekKey
+		}
+		if v := strings.TrimSpace(req.DeepSeekModel); v != "" {
+			cfg.DeepSeekModel = v
+		}
 		wall = 120 * time.Second
 		// 搜索词由 DeepSeek 端的模型自行决定，"test" 太空泛会让它跳过搜索直接作答。
 		probeQuery = "DeepSeek company official website"
